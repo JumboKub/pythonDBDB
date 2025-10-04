@@ -16,79 +16,27 @@ from .logical import LogicalBase
 from .logical import ValueRef
 
 
-class BinaryTree(LogicalBase):
-    def __init__(self, storage):
-        super().__init__()   
-        self._storage = storage
-
-    def node_ref_class(self):
-        return BinaryNodeRef
-
-    def value_ref_class(self, value=None):
-        return ValueRef(value)
-
-    def _get(self, node, key):
-        while node is not None:
-            if key < node.key:
-                node = self._follow(node.left_ref)
-            elif node.key < key:
-                node = self._follow(node.right_ref)
-            else:
-                return self._follow(node.value_ref)
-        raise KeyError
-
-    def _insert(self, node, key, value_ref):
-        if node is None:
-            new_node = BinaryNode(
-                self.node_ref_class(), key, value_ref,
-                self.node_ref_class(), 1
-            )
-        elif key < node.key:
-            new_node = BinaryNode.from_node(
-                node,
-                left_ref=self._insert(
-                    self._follow(node.left_ref), key, value_ref
-                )
-            )
-        elif node.key < key:
-            new_node = BinaryNode.from_node(
-                node,
-                right_ref=self._insert(
-                    self._follow(node.right_ref), key, value_ref
-                )
-            )
-        else:
-            new_node = BinaryNode.from_node(node, value_ref=value_ref)
-        return self.node_ref_class(referent=new_node)
-
-
 class BinaryNode(object):
-    def __init__(self, left_ref, key, value_ref, right_ref, length):
-        self.left_ref = left_ref
+    def __init__(self, key, value_ref, left_ref=None, right_ref=None, length=1):
         self.key = key
         self.value_ref = value_ref
+        self.left_ref = left_ref
         self.right_ref = right_ref
         self.length = length
 
-    @staticmethod
-    def from_node(node, **kwargs):
-        params = {
-            'left_ref': node.left_ref,
-            'key': node.key,
-            'value_ref': node.value_ref,
-            'right_ref': node.right_ref,
-            'length': node.length,
-        }
-        params.update(kwargs)
-        return BinaryNode(**params)
-
     def store_refs(self, storage):
-        self.value_ref.store(storage)
-        self.left_ref.store(storage)
-        self.right_ref.store(storage)
+        if self.left_ref:
+            self.left_ref.store(storage)
+        if self.right_ref:
+            self.right_ref.store(storage)
+        if self.value_ref:
+            self.value_ref.store(storage)
 
 
 class BinaryNodeRef(ValueRef):
+    def __init__(self, referent=None, address=None):
+        super(BinaryNodeRef, self).__init__(referent, address)
+
     def prepare_to_store(self, storage):
         if self._referent:
             self._referent.store_refs(storage)
@@ -96,9 +44,82 @@ class BinaryNodeRef(ValueRef):
     @staticmethod
     def referent_to_string(referent):
         return pickle.dumps({
-            'left': referent.left_ref.address,
+            'left': referent.left_ref.address if referent.left_ref else None,
             'key': referent.key,
-            'value': referent.value_ref.address,
-            'right': referent.right_ref.address,
+            'value': referent.value_ref.address if referent.value_ref else None,
+            'right': referent.right_ref.address if referent.right_ref else None,
             'length': referent.length,
         })
+
+    @staticmethod
+    def string_to_referent(string):
+        data = pickle.loads(string)
+        return BinaryNode(
+            key=data['key'],
+            value_ref=ValueRef(address=data['value']),
+            left_ref=BinaryNodeRef(address=data['left']) if data['left'] else None,
+            right_ref=BinaryNodeRef(address=data['right']) if data['right'] else None,
+            length=data['length']
+        )
+
+
+class BinaryTree(LogicalBase):
+    node_ref_class = BinaryNodeRef
+
+    def __init__(self, storage):
+        super(BinaryTree, self).__init__(storage)
+
+    def set(self, key, value):
+        """Insert key, value into the tree."""
+        value_ref = ValueRef(referent=value)
+        if not self._tree_ref or not self._tree_ref.referent:
+            self._tree_ref = self.node_ref_class(
+                referent=BinaryNode(key, value_ref)
+            )
+        else:
+            self._tree_ref = self._insert(self._tree_ref, key, value_ref)
+
+    def _insert(self, node_ref, key, value_ref):
+        node = node_ref.referent
+        if node is None:
+            return self.node_ref_class(
+                referent=BinaryNode(key, value_ref)
+            )
+
+        if key < node.key:
+            node.left_ref = self._insert(node.left_ref, key, value_ref) if node.left_ref else self.node_ref_class(
+                referent=BinaryNode(key, value_ref)
+            )
+        elif key > node.key:
+            node.right_ref = self._insert(node.right_ref, key, value_ref) if node.right_ref else self.node_ref_class(
+                referent=BinaryNode(key, value_ref)
+            )
+        else:
+            node.value_ref = value_ref
+
+        node.length = 1 + (node.left_ref.referent.length if node.left_ref and node.left_ref.referent else 0) + \
+                    (node.right_ref.referent.length if node.right_ref and node.right_ref.referent else 0)
+
+        return self.node_ref_class(referent=node)
+
+    def get(self, key):
+        """Retrieve a value by key."""
+        node_ref = self._tree_ref
+        while node_ref and node_ref.referent:
+            node = node_ref.referent
+            if key < node.key:
+                node_ref = node.left_ref
+            elif key > node.key:
+                node_ref = node.right_ref
+            else:
+                return node.value_ref.referent
+        return None
+    
+    def commit(self):
+        """Persist the current tree to storage."""
+        if self._tree_ref:
+            # store all refs
+            self._tree_ref.store(self._storage)
+            # update root address in storage
+            self._storage.set_root_address(self._tree_ref.address)
+            self._storage.commit()
